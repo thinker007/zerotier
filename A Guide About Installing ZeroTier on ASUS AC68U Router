@@ -1,0 +1,174 @@
+**Based on Merlin 380.68_4 Firmware, but should be working on any router that supports Entware.**
+
+Added:19/11/26, all "zt0, zt1, ztzlgf7vul" can be replaced by zt+ for wild matching in iptables only!
+
+1. Entware installation.
+`$ entware-setup.sh`
+
+2. Then install ZeroTier using Entware:
+`$ opkg update`
+`$ opkg install zerotier`
+
+3. Start TUN
+You might get this error in step 4 `Cannot open TUN/TAP dev /dev/net/tun: No such file or directory (errno=2)`, then run this at first.
+`$ modprobe tun`
+
+4. Start zerotier service
+`$ zerotier-one -d`
+
+5. Check service status, should be 200
+`$ zerotier-cli info`
+
+6. Joint zerotie network
+`$ zerotier-cli join <your network id>`
+go to `my.zerotier.com` to enable your new node. `10.9.8.2` is router, `10.9.8.10` is VPS get your network id from `my.zerotier.com` network, it looks like this `9afac5978a18fe8`
+
+7. Test the network, should not work.
+`$ ping 10.9.8.10 -c 4`
+ping without '-c 4' or terminated by `ctrl-c` will cause zerotier crashing, if so run `zerotier-one -d` again
+
+8. Add iptables rules
+You may run `iptables -v -L -n --line-numbers` first, get an idea of how your iptables looks. please don't just do copy & paste. ACCEPT all data from zerotier.
+`$ iptables -I INPUT -i zt+ -j ACCEPT`
+Restart zerotier
+`$ /opt/etc/init.d/S90zerotier-one.sh stop` or `killall zerotier-one`
+`$ zerotier-one -d`
+
+9. Test the network, should work this time.
+`$ ping 10.9.8.10 -c 4` #Ctrl+C terminates the ping will crash the zerotier be careful
+
+10. Allow FTP, SSH, WEBUI to be accessed from zerotier
+`$ iptables -t nat -A PREROUTING -d 10.9.8.2 -p tcp --m multiport --dport 21,22,80 -j DNAT --to-destination 192.168.9.1`
+Or alternative way: quote mark (the key next to the ! key on your keyboard ) around nvram get lan_ipaddr is needed.
+$ iptables -t nat -I PREROUTING -i zt+ -d 10.9.8.0/24 -p tcp -m multiport --dport 21,22,80 -j DNAT --to-destination `nvram get lan_ipaddr`
+
+
+11. Create the script to run zerotier: https://gist.github.com/meoso/b25bd410c8a54a1a013f0cc2d72b12ee
+`$ nano /opt/etc/init.d/S90zerotier-one.sh`
+`$ chmod 755 /opt/etc/init.d/S90zerotier-one.sh`
+
+12. Setup cron, check zerotier each minute
+`$ cru a ZeroTierDaemon "* * * * * /opt/etc/init.d/S90zerotier-one.sh start"`
+
+13. Scripts for booting
+```
+/jffs/scripts/nat-start #Changed from init-start to nat-start
+/jffs/scripts/wan-start
+/jffs/scripts/firewall-start
+/opt/etc/init.d/S90zerotier-one.sh
+```
+
+14. Make all scripts excutable
+`$ chmod a+rx /jffs/scripts/*`
+
+-------------------------------------------------------
+
+**Use these commands to debug iptables**
+
+Reset Packet Counts and Aggregate Size
+`$ iptables -Z`
+`$ iptables -Z INPUT`
+`$ iptables -Z INPUT 1`
+
+include -v to see the entire rule.
+`$ iptables -v -L -n --line-numbers`
+`$ iptables -v -L INPUT -n --line-numbers`
+
+see all nat tables
+`$ iptables -v -t nat -L -n --line-numbers`
+
+The line numbers help with deleting rules.
+`$ iptables -D [INPUT|FORWARD|OUTPUT|myCHAINNAME] [Rule#]`
+
+The -n speeds up the process by not doing hostname lookups
+`$ iptables -nvL [INPUT|FORWARD|OUTPUT|myCHAINNAME] --line-numbers`
+
+Put print debug info into syslog
+`echo "$(date) Started ZeroTier-One" | logger -t "$(date) Started ZeroTier-One" -p user.notice ;`
+
+List all known nodes
+`$ arp -a`
+
+-------------------------------------------------------
+
+**All scripts
+
+/jffs/scripts/nat-start
+```
+#!/bin/sh
+modprobe tun
+```
+
+/jffs/scripts/wan-start
+```
+#!/bin/sh
+cru a ZeroTierDaemon "* * * * * /opt/etc/init.d/S90zerotier-one.sh start"
+```
+
+/jffs/scripts/firewall-start
+```
+#!/bin/sh
+logger -t "custom iptables" "Enter" -p user.notice
+iptables -C INPUT -i zt+ -j ACCEPT
+if [ $? != 0 ]; then
+iptables -I INPUT -i zt+ -j ACCEPT
+iptables -t nat -I PREROUTING -i zt+ -d 10.9.8.0/24 -p tcp -m multiport --dport 21,22,80 -j DNAT --to-destination `nvram get lan_ipaddr`
+logger -t "custom iptables" "rules added" -p user.notice
+else
+logger -t "custom iptables" "rules existed skip" -p user.notice
+fi
+```
+
+/opt/etc/init.d/S90zerotier-one.sh
+```
+#! /bin/sh
+
+case "$1" in
+start)
+if lsmod | grep -q tun ;
+then echo "mod tun ready" ;
+else
+modprobe tun;
+logger -t "zerotier" -c "modprobe tun started, zerotier-one should start in one minute" -p user.notice ;
+exit 0;
+fi
+if ( pidof zerotier-one )
+then echo "ZeroTier-One is already running."
+else
+echo "Starting ZeroTier-One" ;
+/opt/bin/zerotier-one -d ;
+echo "$(date) ZeroTier-One Started" | logger -t "zerotier" -c "Started" -p user.notice ; #>> /opt/var/log/zerotier-one.log ;
+fi
+;;
+stop)
+if ( pidof zerotier-one )
+then
+echo "Stopping ZeroTier-One";
+killall zerotier-one
+echo "$(date) ZeroTier-One Stopped" | logger -t "zerotier" -c "Stopped" -p user.notice ; #>> /opt/var/log/zerotier-one.log
+else
+echo "ZeroTier-One was not running" ;
+fi
+;;
+status)
+if ( pidof zerotier-one )
+then echo "ZeroTier-One is running."
+else echo "ZeroTier-One is NOT running"
+fi
+;;
+*)
+echo "Usage: /etc/init.d/zerotier-one {start|stop|status}"
+exit 1
+;;
+esac
+exit 0
+```
+
+Updated 2019/11/05
+
+If you experienced issues with zerotier ssh and webui. Such as putty hangs with outputting 10+ lines.
+Try to change MTU from default 2800 to this or smaller value `ifconfig ztzlgf7vul mtu 1388`
+
+Updated 2019/12/06
+
+Removed the confusion over the iptables rules.
